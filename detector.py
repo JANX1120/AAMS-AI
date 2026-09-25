@@ -20,9 +20,8 @@ YOLO_MODEL_PATH = BASE_DIR / "yolo26n.pt"
 
 yolo_model = YOLO(str(YOLO_MODEL_PATH))
 
-head_pose_model = SixDRepNet(
-    gpu_id=-1
-)
+# TEMPORARY: disabled for Render memory test
+head_pose_model = None
 
 # =====================================================
 # AI SETTINGS
@@ -425,17 +424,6 @@ def detect_frame(frame):
     # =====================================================
 
     head_pose_results = []
-
-
-    if len(person_boxes) > 0:
-
-        head_pose_results = (
-            detect_head_pose(
-                frame,
-                person_boxes
-            )
-        )
-
 
     # =====================================================
     # PEEKING INFORMATION
