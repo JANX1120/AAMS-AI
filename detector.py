@@ -20,7 +20,7 @@ YOLO_MODEL_PATH = BASE_DIR / "yolo26n.pt"
 
 yolo_model = YOLO(str(YOLO_MODEL_PATH))
 
-head_pose_model = SixDRepNet()
+head_pose_model = SixDRepNet(gpu_id=-1)
 
 
 # =====================================================
