@@ -20,12 +20,13 @@ YOLO_MODEL_PATH = BASE_DIR / "yolo26n.pt"
 
 yolo_model = YOLO(str(YOLO_MODEL_PATH))
 
-# TEMPORARY: disabled for Render memory test
-head_pose_model = None
+head_pose_model = SixDRepNet()
+
 
 # =====================================================
 # AI SETTINGS
 # =====================================================
+
 YOLO_CONFIDENCE = 0.60
 
 HEAD_YAW_THRESHOLD = 35
@@ -37,6 +38,7 @@ MIN_OBJECT_CONFIDENCE = 0.60
 # Minimum person box size for head-pose analysis
 MIN_PERSON_WIDTH = 80
 MIN_PERSON_HEIGHT = 120
+
 
 # =====================================================
 # HEAD DIRECTION
@@ -423,7 +425,11 @@ def detect_frame(frame):
     # HEAD POSE
     # =====================================================
 
-    head_pose_results = []
+    head_pose_results = detect_head_pose(
+        frame,
+        person_boxes
+    )
+
 
     # =====================================================
     # PEEKING INFORMATION
