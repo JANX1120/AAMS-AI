@@ -95,7 +95,7 @@ def detect_head_pose(
         person_boxes
     ):
 
-            track_id = person_box.get(
+        track_id = person_box.get(
             "track_id"
         )
 
@@ -103,7 +103,6 @@ def detect_head_pose(
             person_label = f"Person {index + 1}"
         else:
             person_label = f"Person {track_id}"
-            
 
         x1 = max(
             0,
@@ -125,17 +124,14 @@ def detect_head_pose(
             int(person_box["y2"])
         )
 
-
         person_width = x2 - x1
         person_height = y2 - y1
-
 
         if (
             person_width <= 0 or
             person_height <= 0
         ):
             continue
-
 
         # =====================================================
         # APPROXIMATE HEAD REGION
@@ -151,14 +147,12 @@ def detect_head_pose(
             int(person_width * 0.15)
         )
 
-
         head_y1 = y1
 
         head_y2 = (
             y1 +
             int(person_height * 0.40)
         )
-
 
         head_x1 = max(
             0,
@@ -180,23 +174,19 @@ def detect_head_pose(
             head_y2
         )
 
-
         head_crop = frame[
             head_y1:head_y2,
             head_x1:head_x2
         ]
 
-
         if head_crop.size == 0:
             continue
-
 
         if (
             head_crop.shape[0] < 50 or
             head_crop.shape[1] < 50
         ):
             continue
-
 
         try:
 
@@ -205,7 +195,6 @@ def detect_head_pose(
                     head_crop
                 )
             )
-
 
             pitch = float(
                 np.asarray(
@@ -225,7 +214,6 @@ def detect_head_pose(
                 ).reshape(-1)[0]
             )
 
-
             direction = (
                 get_head_direction(
                     pitch,
@@ -234,18 +222,16 @@ def detect_head_pose(
                 )
             )
 
-
             possible_peeking = (
                 direction == "left" or
                 direction == "right"
             )
 
-
             head_results.append({
 
-               "person":
+                "person":
                     person_label,
-                
+
                 "track_id":
                     track_id,
 
@@ -289,14 +275,12 @@ def detect_head_pose(
                 }
             })
 
-
         except Exception as error:
 
             print(
-                f"Head pose error for Person {index + 1}:",
+                f"Head pose error for {person_label}:",
                 error
             )
-
 
     return head_results
 
@@ -308,35 +292,25 @@ def detect_head_pose(
 def detect_frame(frame):
 
     # =====================================================
-    # YOLO DETECTION
+    # YOLO TRACKING
     # =====================================================
 
     results = yolo_model.track(
-
-    source=frame,
-
-    conf=YOLO_CONFIDENCE,
-
-    persist=True,
-
-    tracker="bytetrack.yaml",
-
-    verbose=False
-)
-
+        source=frame,
+        conf=YOLO_CONFIDENCE,
+        persist=True,
+        tracker="bytetrack.yaml",
+        verbose=False
+    )
 
     result = results[0]
-
 
     people = 0
     phones = 0
     books = 0
 
-
     detection_list = []
-
     person_boxes = []
-
 
     # =====================================================
     # LOOP DETECTIONS
@@ -348,23 +322,19 @@ def detect_frame(frame):
             box.cls[0]
         )
 
-
         class_name = (
             yolo_model.names[
                 class_id
             ]
         )
 
-
         confidence = float(
             box.conf[0]
         )
 
-
         x1, y1, x2, y2 = (
             box.xyxy[0].tolist()
         )
-
 
         detection_data = {
 
@@ -393,36 +363,44 @@ def detect_frame(frame):
             }
         }
 
-
         # =====================================================
         # PERSON
         # =====================================================
 
-       if class_name == "person":
+        if class_name == "person":
 
-    people += 1
+            people += 1
 
-    # Get persistent YOLO tracking ID
-    track_id = None
+            # Get persistent YOLO tracking ID
+            track_id = None
 
-    if box.id is not None:
-        track_id = int(box.id[0])
+            if box.id is not None:
+                track_id = int(box.id[0])
 
-    detection_data["track_id"] = track_id
+            detection_data["track_id"] = track_id
 
-    if track_id is not None:
-        detection_data["person"] = f"Person {track_id}"
+            if track_id is not None:
+                detection_data["person"] = (
+                    f"Person {track_id}"
+                )
 
-    person_boxes.append({
+            person_boxes.append({
 
-        "track_id": track_id,
+                "track_id":
+                    track_id,
 
-        "x1": x1,
-        "y1": y1,
-        "x2": x2,
-        "y2": y2
-    })
+                "x1":
+                    x1,
 
+                "y1":
+                    y1,
+
+                "x2":
+                    x2,
+
+                "y2":
+                    y2
+            })
 
         # =====================================================
         # PHONE
@@ -431,7 +409,6 @@ def detect_frame(frame):
         elif class_name == "cell phone":
 
             phones += 1
-
 
         # =====================================================
         # BOOK
@@ -445,7 +422,6 @@ def detect_frame(frame):
             detection_data
         )
 
-
     # =====================================================
     # HEAD POSE
     # =====================================================
@@ -455,15 +431,12 @@ def detect_frame(frame):
         person_boxes
     )
 
-
     # =====================================================
     # PEEKING INFORMATION
     # =====================================================
 
     peeking_count = 0
-
     peeking_people = []
-
 
     for head in head_pose_results:
 
@@ -477,11 +450,9 @@ def detect_frame(frame):
                 head["person"]
             )
 
-
     possible_peeking = (
         peeking_count > 0
     )
-
 
     # =====================================================
     # POSSIBLE VIOLATION RULES
@@ -489,13 +460,11 @@ def detect_frame(frame):
 
     violation_list = []
 
-
     if phones > 0:
 
         violation_list.append(
             "Mobile Phone Detected"
         )
-
 
     if books > 0:
 
@@ -503,13 +472,11 @@ def detect_frame(frame):
             "Unauthorized Book Detected"
         )
 
-
     if people > 1:
 
         violation_list.append(
             "Multiple Persons Detected"
         )
-
 
     # Possible signal only.
     # Home.js should still confirm it
@@ -521,7 +488,6 @@ def detect_frame(frame):
             "Possible Peeking Detected"
         )
 
-
     # =====================================================
     # RESULT
     # =====================================================
@@ -530,7 +496,6 @@ def detect_frame(frame):
 
         "success":
             True,
-
 
         # YOLO
 
@@ -542,7 +507,6 @@ def detect_frame(frame):
 
         "books":
             books,
-
 
         # HEAD POSE
 
@@ -558,7 +522,6 @@ def detect_frame(frame):
         "head_pose":
             head_pose_results,
 
-
         # POSSIBLE VIOLATIONS
 
         "violations":
@@ -569,12 +532,10 @@ def detect_frame(frame):
         "violation_list":
             violation_list,
 
-
         # DETECTIONS
 
         "detections":
             detection_list,
-
 
         # IMAGE SIZE
 
