@@ -471,13 +471,7 @@ def detect_frame(frame):
         violation_list.append(
             "Unauthorized Book Detected"
         )
-
-    if people > 1:
-
-        violation_list.append(
-            "Multiple Persons Detected"
-        )
-
+        
     # Possible signal only.
     # Home.js should still confirm it
     # across multiple frames.
