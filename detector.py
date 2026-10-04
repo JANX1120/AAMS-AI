@@ -95,6 +95,16 @@ def detect_head_pose(
         person_boxes
     ):
 
+            track_id = person_box.get(
+            "track_id"
+        )
+
+        if track_id is None:
+            person_label = f"Person {index + 1}"
+        else:
+            person_label = f"Person {track_id}"
+            
+
         x1 = max(
             0,
             int(person_box["x1"])
@@ -233,8 +243,11 @@ def detect_head_pose(
 
             head_results.append({
 
-                "person":
-                    f"Person {index + 1}",
+               "person":
+                    person_label,
+                
+                "track_id":
+                    track_id,
 
                 "pitch":
                     round(
@@ -298,14 +311,18 @@ def detect_frame(frame):
     # YOLO DETECTION
     # =====================================================
 
-    results = yolo_model.predict(
+    results = yolo_model.track(
 
-        source=frame,
+    source=frame,
 
-        conf=YOLO_CONFIDENCE,
+    conf=YOLO_CONFIDENCE,
 
-        verbose=False
-    )
+    persist=True,
+
+    tracker="bytetrack.yaml",
+
+    verbose=False
+)
 
 
     result = results[0]
@@ -377,30 +394,34 @@ def detect_frame(frame):
         }
 
 
-        detection_list.append(
-            detection_data
-        )
-
-
         # =====================================================
         # PERSON
         # =====================================================
 
-        if class_name == "person":
+       if class_name == "person":
 
-            people += 1
+    people += 1
 
+    # Get persistent YOLO tracking ID
+    track_id = None
 
-            person_boxes.append({
+    if box.id is not None:
+        track_id = int(box.id[0])
 
-                "x1": x1,
+    detection_data["track_id"] = track_id
 
-                "y1": y1,
+    if track_id is not None:
+        detection_data["person"] = f"Person {track_id}"
 
-                "x2": x2,
+    person_boxes.append({
 
-                "y2": y2
-            })
+        "track_id": track_id,
+
+        "x1": x1,
+        "y1": y1,
+        "x2": x2,
+        "y2": y2
+    })
 
 
         # =====================================================
@@ -419,6 +440,10 @@ def detect_frame(frame):
         elif class_name == "book":
 
             books += 1
+
+        detection_list.append(
+            detection_data
+        )
 
 
     # =====================================================
