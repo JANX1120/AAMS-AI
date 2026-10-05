@@ -27,7 +27,7 @@ head_pose_model = SixDRepNet(gpu_id=-1)
 # AI SETTINGS
 # =====================================================
 
-YOLO_CONFIDENCE = 0.60
+YOLO_CONFIDENCE = 0.50
 
 HEAD_YAW_THRESHOLD = 35
 HEAD_PITCH_THRESHOLD = 30
