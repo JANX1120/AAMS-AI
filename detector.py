@@ -296,12 +296,13 @@ def detect_frame(frame):
     # =====================================================
 
     results = yolo_model.track(
-        source=frame,
-        conf=YOLO_CONFIDENCE,
-        persist=True,
-        tracker="bytetrack.yaml",
-        verbose=False
-    )
+    source=frame,
+    conf=YOLO_CONFIDENCE,
+    classes=[0, 67, 73],
+    persist=True,
+    tracker="bytetrack.yaml",
+    verbose=False
+)
 
     result = results[0]
 
