@@ -8,4 +8,5 @@ opencv-python-headless
 torch
 torchvision
 ultralytics
+lap==0.5.13
 sixdrepnet

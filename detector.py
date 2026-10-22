@@ -1,542 +1,287 @@
-from ultralytics import YOLO
-from sixdrepnet import SixDRepNet
+"""Object tracking and per-frame head-pose signals for the AAMS dashboard."""
+
+import logging
+import os
+from functools import wraps
+from pathlib import Path
+from threading import RLock
 
 import numpy as np
-from pathlib import Path
+import torch
+from sixdrepnet import SixDRepNet
+from ultralytics import YOLO
 
-
-# =====================================================
-# PATHS
-# =====================================================
-
+logger = logging.getLogger(__name__)
 BASE_DIR = Path(__file__).resolve().parent
-
 YOLO_MODEL_PATH = BASE_DIR / "yolo26n.pt"
-
-
-# =====================================================
-# LOAD AI MODELS
-# =====================================================
-
-yolo_model = YOLO(str(YOLO_MODEL_PATH))
-
-head_pose_model = SixDRepNet(gpu_id=-1)
-
-
-# =====================================================
-# AI SETTINGS
-# =====================================================
-
 YOLO_CONFIDENCE = 0.50
-
+MIN_OBJECT_CONFIDENCE = 0.60
 HEAD_YAW_THRESHOLD = 35
 HEAD_PITCH_THRESHOLD = 30
+MIN_PERSON_WIDTH = 100
+MIN_PERSON_HEIGHT = 160
 
-# Ignore very weak detections even if YOLO returns them
-MIN_OBJECT_CONFIDENCE = 0.60
+MIN_HEAD_CROP_WIDTH = 80
+MIN_HEAD_CROP_HEIGHT = 80
 
-# Minimum person box size for head-pose analysis
-MIN_PERSON_WIDTH = 80
-MIN_PERSON_HEIGHT = 120
+YOLO_IMAGE_SIZE = 640
 
+# Ultralytics' predictor and persistent tracker are mutable. Protect the entire
+# pipeline, including initialization, when called from multiple worker threads.
+_model_lock = RLock()
+yolo_model = None
+head_pose_model = None
 
-# =====================================================
-# HEAD DIRECTION
-# =====================================================
+# Multi-frame head-turn observation tracking
+HEAD_TURN_REQUIRED_FRAMES = 3
+HEAD_TURN_MAX_GAP_FRAMES = 2
 
-def get_head_direction(
-    pitch,
-    yaw,
-    roll
-):
-
-    pitch = float(pitch)
-    yaw = float(yaw)
-    roll = float(roll)
+head_turn_history = {}
+frame_counter = 0
+active_session_id = None
 
 
+def initialize_models():
+    """Load once, using local weights and CPU head-pose inference."""
+    global yolo_model, head_pose_model
+    with _model_lock:
+        if yolo_model is None:
+            # Limit CPU oversubscription on small hosted instances. Override for
+            # the deployment CPU allocation with AAMS_TORCH_THREADS.
+            threads = int(os.getenv("AAMS_TORCH_THREADS", str(min(4, torch.get_num_threads()))))
+            if threads < 1:
+                raise ValueError("AAMS_TORCH_THREADS must be positive.")
+            torch.set_num_threads(threads)
+            if not YOLO_MODEL_PATH.is_file():
+                raise FileNotFoundError(f"YOLO weights are missing: {YOLO_MODEL_PATH}")
+            yolo_model = YOLO(str(YOLO_MODEL_PATH))
+        if head_pose_model is None:
+            head_pose_model = SixDRepNet(gpu_id=-1)
+
+
+def _serialized(function):
+    @wraps(function)
+    def wrapped(*args, **kwargs):
+        with _model_lock:
+            return function(*args, **kwargs)
+    return wrapped
+
+
+def get_head_direction(pitch, yaw, roll):
+    """Preserve the dashboard's existing angle and direction convention."""
+    pitch, yaw, roll = float(pitch), float(yaw), float(roll)
+    if not np.isfinite([pitch, yaw, roll]).all():
+        raise ValueError("Head-pose angles must be finite.")
     if yaw <= -HEAD_YAW_THRESHOLD:
         return "left"
-
-
     if yaw >= HEAD_YAW_THRESHOLD:
         return "right"
-
-
     if pitch <= -HEAD_PITCH_THRESHOLD:
         return "up"
-
-
     if pitch >= HEAD_PITCH_THRESHOLD:
         return "down"
-
-
     return "forward"
 
 
-# =====================================================
-# HEAD POSE DETECTION
-# =====================================================
-
-def detect_head_pose(
-    frame,
-    person_boxes
-):
-
+def detect_head_pose(frame, person_boxes):
+    """Estimate pose from approximate head crops; these are possible signals only."""
     head_results = []
+    height, width = frame.shape[:2]
+    for index, person in enumerate(person_boxes):
+        track_id = person.get("track_id")
+        label = f"Person {track_id if track_id is not None else index + 1}"
+        x1, y1 = max(0, int(person["x1"])), max(0, int(person["y1"]))
+        x2, y2 = min(width, int(person["x2"])), min(height, int(person["y2"]))
+        person_width, person_height = x2 - x1, y2 - y1
+        if person_width < MIN_PERSON_WIDTH or person_height < MIN_PERSON_HEIGHT:
+            continue
+        head_x1 = x1 + int(person_width * 0.15)
+        head_x2 = x2 - int(person_width * 0.15)
+        head_y2 = y1 + int(person_height * 0.40)
+        crop = frame[y1:head_y2, head_x1:head_x2]
+        if crop.size == 0:
+            continue
 
-
-    frame_height, frame_width = (
-        frame.shape[:2]
-    )
-
-
-    for index, person_box in enumerate(
-        person_boxes
-    ):
-
-        track_id = person_box.get(
-            "track_id"
-        )
-
-        if track_id is None:
-            person_label = f"Person {index + 1}"
-        else:
-            person_label = f"Person {track_id}"
-
-        x1 = max(
-            0,
-            int(person_box["x1"])
-        )
-
-        y1 = max(
-            0,
-            int(person_box["y1"])
-        )
-
-        x2 = min(
-            frame_width,
-            int(person_box["x2"])
-        )
-
-        y2 = min(
-            frame_height,
-            int(person_box["y2"])
-        )
-
-        person_width = x2 - x1
-        person_height = y2 - y1
+        crop_height, crop_width = crop.shape[:2]
 
         if (
-            person_width <= 0 or
-            person_height <= 0
+            crop_width < MIN_HEAD_CROP_WIDTH
+            or crop_height < MIN_HEAD_CROP_HEIGHT
         ):
             continue
-
-        # =====================================================
-        # APPROXIMATE HEAD REGION
-        # =====================================================
-
-        head_x1 = (
-            x1 +
-            int(person_width * 0.15)
-        )
-
-        head_x2 = (
-            x2 -
-            int(person_width * 0.15)
-        )
-
-        head_y1 = y1
-
-        head_y2 = (
-            y1 +
-            int(person_height * 0.40)
-        )
-
-        head_x1 = max(
-            0,
-            head_x1
-        )
-
-        head_y1 = max(
-            0,
-            head_y1
-        )
-
-        head_x2 = min(
-            frame_width,
-            head_x2
-        )
-
-        head_y2 = min(
-            frame_height,
-            head_y2
-        )
-
-        head_crop = frame[
-            head_y1:head_y2,
-            head_x1:head_x2
-        ]
-
-        if head_crop.size == 0:
-            continue
-
-        if (
-            head_crop.shape[0] < 50 or
-            head_crop.shape[1] < 50
-        ):
-            continue
-
         try:
-
-            pitch, yaw, roll = (
-                head_pose_model.predict(
-                    head_crop
-                )
-            )
-
-            pitch = float(
-                np.asarray(
-                    pitch
-                ).reshape(-1)[0]
-            )
-
-            yaw = float(
-                np.asarray(
-                    yaw
-                ).reshape(-1)[0]
-            )
-
-            roll = float(
-                np.asarray(
-                    roll
-                ).reshape(-1)[0]
-            )
-
-            direction = (
-                get_head_direction(
-                    pitch,
-                    yaw,
-                    roll
-                )
-            )
-
-            possible_peeking = (
-                direction == "left" or
-                direction == "right"
-            )
-
+            angles = head_pose_model.predict(np.ascontiguousarray(crop))
+            pitch, yaw, roll = [float(np.asarray(angle).reshape(-1)[0]) for angle in angles]
+            direction = get_head_direction(pitch, yaw, roll)
             head_results.append({
-
-                "person":
-                    person_label,
-
-                "track_id":
-                    track_id,
-
-                "pitch":
-                    round(
-                        pitch,
-                        2
-                    ),
-
-                "yaw":
-                    round(
-                        yaw,
-                        2
-                    ),
-
-                "roll":
-                    round(
-                        roll,
-                        2
-                    ),
-
-                "direction":
-                    direction,
-
-                "possible_peeking":
-                    possible_peeking,
-
-                "box": {
-
-                    "x1":
-                        head_x1,
-
-                    "y1":
-                        head_y1,
-
-                    "x2":
-                        head_x2,
-
-                    "y2":
-                        head_y2
-                }
+                "person": label, "track_id": track_id,
+                "pitch": round(pitch, 2), "yaw": round(yaw, 2), "roll": round(roll, 2),
+                "direction": direction,
+                "possible_peeking": False,
+                "head_turned": direction in {"left", "right"},
+                "box": {"x1": head_x1, "y1": y1, "x2": head_x2, "y2": head_y2},
             })
-
-        except Exception as error:
-
-            print(
-                f"Head pose error for {person_label}:",
-                error
-            )
-
+        except Exception:
+            logger.exception("Head-pose estimation failed for %s", label)
     return head_results
 
+def update_head_turn_history(heads):
+    """Track repeated head turns for a single camera stream."""
+    global frame_counter
 
-# =====================================================
-# MAIN AI DETECTION
-# =====================================================
+    frame_counter += 1
+    observations = []
 
-def detect_frame(frame):
+    for head in heads:
+        track_id = head.get("track_id")
 
-    # =====================================================
-    # YOLO TRACKING
-    # =====================================================
+        # Do not combine observations without a reliable tracking ID.
+        if track_id is None:
+            continue
 
-    results = yolo_model.track(
-    source=frame,
-    conf=YOLO_CONFIDENCE,
-    classes=[0, 67, 73],
-    persist=True,
-    tracker="bytetrack.yaml",
-    verbose=False
-)
+        direction = head.get("direction", "forward")
+        turned = direction in {"left", "right"}
 
-    result = results[0]
+        previous = head_turn_history.get(track_id)
 
-    people = 0
-    phones = 0
-    books = 0
+        if turned:
+            if (
+                previous
+                and previous["direction"] == direction
+                and frame_counter - previous["last_seen"] == 1
+            ):
+                count = previous["count"] + 1
+            else:
+                count = 1
+        else:
+            count = 0
 
-    detection_list = []
-    person_boxes = []
-
-    # =====================================================
-    # LOOP DETECTIONS
-    # =====================================================
-
-    for box in result.boxes:
-
-        class_id = int(
-            box.cls[0]
-        )
-
-        class_name = (
-            yolo_model.names[
-                class_id
-            ]
-        )
-
-        confidence = float(
-            box.conf[0]
-        )
-
-        x1, y1, x2, y2 = (
-            box.xyxy[0].tolist()
-        )
-
-        detection_data = {
-
-            "class":
-                class_name,
-
-            "confidence":
-                round(
-                    confidence,
-                    2
-                ),
-
-            "box": {
-
-                "x1":
-                    round(x1),
-
-                "y1":
-                    round(y1),
-
-                "x2":
-                    round(x2),
-
-                "y2":
-                    round(y2)
-            }
+        head_turn_history[track_id] = {
+            "direction": direction,
+            "count": count,
+            "last_seen": frame_counter,
         }
 
-        # =====================================================
-        # PERSON
-        # =====================================================
+        observations.append({
+            "person": head["person"],
+            "track_id": track_id,
+            "direction": direction,
+            "consecutive_frames": count,
+            "sustained_head_turn": turned and count >= HEAD_TURN_REQUIRED_FRAMES,
+        })
 
-        if class_name == "person":
+    # Remove stale tracking records.
+    stale_ids = [
+        track_id
+        for track_id, state in head_turn_history.items()
+        if frame_counter - state["last_seen"] > HEAD_TURN_MAX_GAP_FRAMES
+    ]
 
-            people += 1
+    for track_id in stale_ids:
+        del head_turn_history[track_id]
 
-            # Get persistent YOLO tracking ID
-            track_id = None
+    return observations
 
-            if box.id is not None:
-                track_id = int(box.id[0])
 
-            detection_data["track_id"] = track_id
+@_serialized
+@torch.inference_mode()
+def detect_frame(frame, session_id=None):
+    """Track frames from ONE ordered camera stream per server process.
 
-            if track_id is not None:
-                detection_data["person"] = (
-                    f"Person {track_id}"
-                )
+    Persistent IDs must not be shared between unrelated cameras. A multi-camera
+    deployment needs separate tracker instances and an explicit stream ID.
+    """
 
-            person_boxes.append({
+    global active_session_id, frame_counter
 
-                "track_id":
-                    track_id,
+    if not isinstance(session_id, str) or not session_id.strip():
+        raise ValueError("A valid camera session ID is required.")
 
-                "x1":
-                    x1,
+    if session_id != active_session_id:
+        logger.info("Switching AI monitoring session.")
 
-                "y1":
-                    y1,
+        if yolo_model is not None:
+            predictor = getattr(yolo_model, "predictor", None)
+            if predictor is not None:
+                for tracker in getattr(predictor, "trackers", []):
+                    tracker.reset()
 
-                "x2":
-                    x2,
+        head_turn_history.clear()
+        frame_counter = 0
+        active_session_id = session_id
 
-                "y2":
-                    y2
-            })
-
-        # =====================================================
-        # PHONE
-        # =====================================================
-
-        elif class_name == "cell phone":
-
-            phones += 1
-
-        # =====================================================
-        # BOOK
-        # =====================================================
-
-        elif class_name == "book":
-
-            books += 1
-
-        detection_list.append(
-            detection_data
-        )
-
-    # =====================================================
-    # HEAD POSE
-    # =====================================================
-
-    head_pose_results = detect_head_pose(
-        frame,
-        person_boxes
+    if (not isinstance(frame, np.ndarray) or frame.dtype != np.uint8
+            or frame.ndim != 3 or frame.shape[2] != 3 or frame.size == 0):
+        raise ValueError("Expected a non-empty uint8 BGR image.")
+    initialize_models()
+    height, width = frame.shape[:2]
+    results = yolo_model.track(
+        source=frame, conf=YOLO_CONFIDENCE, classes=[0, 67, 73],
+        persist=True, tracker="bytetrack.yaml", verbose=False, imgsz=YOLO_IMAGE_SIZE,
     )
+    counts = {"person": 0, "cell phone": 0, "book": 0}
+    detections, people = [], []
+    boxes = results[0].boxes if results else None
+    for box in boxes if boxes is not None else ():
+        class_id = int(box.cls[0])
+        name = yolo_model.names[class_id]
+        confidence = float(box.conf[0])
+        threshold = YOLO_CONFIDENCE if name == "person" else MIN_OBJECT_CONFIDENCE
+        if name not in counts or not np.isfinite(confidence) or confidence < threshold:
+            continue
+        coordinates = np.asarray(box.xyxy[0].tolist(), dtype=float)
+        if not np.isfinite(coordinates).all():
+            continue
+        x1, y1, x2, y2 = coordinates
+        x1, x2 = [int(round(np.clip(x, 0, width))) for x in (x1, x2)]
+        y1, y2 = [int(round(np.clip(y, 0, height))) for y in (y1, y2)]
+        if x2 <= x1 or y2 <= y1:
+            continue
+        bounds = {"x1": x1, "y1": y1, "x2": x2, "y2": y2}
+        detection = {"class": name, "confidence": round(confidence, 2), "box": bounds}
+        counts[name] += 1
+        if name == "person":
+            track_id = int(box.id[0]) if box.id is not None else None
+            detection.update(track_id=track_id, person=f"Person {track_id if track_id is not None else counts[name]}")
+            people.append({"track_id": track_id, **bounds})
+        detections.append(detection)
 
-    # =====================================================
-    # PEEKING INFORMATION
-    # =====================================================
+    heads = detect_head_pose(frame, people)
 
-    peeking_count = 0
+    # Analyze head movements across consecutive frames.
+    head_turn_tracking = update_head_turn_history(heads)
+
+    # Record head-direction observations for future
+    # multi-frame analysis.
+    head_turn_observations = [
+        {
+            "person": head["person"],
+            "track_id": head["track_id"],
+            "direction": head["direction"],
+            "yaw": head["yaw"],
+            "pitch": head["pitch"],
+        }
+        for head in heads
+        if head.get("head_turned", False)
+    ]
+
+    # Do not classify head turns as cheating.
     peeking_people = []
-
-    for head in head_pose_results:
-
-        if head[
-            "possible_peeking"
-        ]:
-
-            peeking_count += 1
-
-            peeking_people.append(
-                head["person"]
-            )
-
-    possible_peeking = (
-        peeking_count > 0
-    )
-
-    # =====================================================
-    # POSSIBLE VIOLATION RULES
-    # =====================================================
-
-    violation_list = []
-
-    if phones > 0:
-
-        violation_list.append(
-            "Mobile Phone Detected"
-        )
-
-    if books > 0:
-
-        violation_list.append(
-            "Unauthorized Book Detected"
-        )
-        
-    # Possible signal only.
-    # Home.js should still confirm it
-    # across multiple frames.
-
-    if possible_peeking:
-
-        violation_list.append(
-            "Possible Peeking Detected"
-        )
-
-    # =====================================================
-    # RESULT
-    # =====================================================
-
+    violations = []
+    if counts["cell phone"]:
+        violations.append("Mobile Phone Detected")
+    if counts["book"]:
+        violations.append("Unauthorized Book Detected")
+    if peeking_people:
+        violations.append("Possible Peeking Detected")
     return {
-
-        "success":
-            True,
-
-        # YOLO
-
-        "people":
-            people,
-
-        "phones":
-            phones,
-
-        "books":
-            books,
-
-        # HEAD POSE
-
-        "possible_peeking":
-            possible_peeking,
-
-        "peeking_count":
-            peeking_count,
-
-        "peeking_people":
-            peeking_people,
-
-        "head_pose":
-            head_pose_results,
-
-        # POSSIBLE VIOLATIONS
-
-        "violations":
-            len(
-                violation_list
-            ),
-
-        "violation_list":
-            violation_list,
-
-        # DETECTIONS
-
-        "detections":
-            detection_list,
-
-        # IMAGE SIZE
-
-        "image_width":
-            frame.shape[1],
-
-        "image_height":
-            frame.shape[0]
+        "success": True, "people": counts["person"],
+        "phones": counts["cell phone"], "books": counts["book"],
+        "possible_peeking": bool(peeking_people), "peeking_count": len(peeking_people),
+        "peeking_people": peeking_people,
+        "head_pose": heads,
+        "head_turn_observations": head_turn_observations,
+        "head_turn_tracking": head_turn_tracking,
+        "violations": len(violations), "violation_list": violations,
+        "detections": detections, "image_width": width, "image_height": height,
     }
